@@ -55,6 +55,7 @@
       <AdditionalLibraryDirectories>$(CUDA_PATH_V7_5)\lib\$(Platform)</AdditionalLibraryDirectories>
       <AdditionalDependencies>cudart.lib;</AdditionalDependencies>
     </CudaLink>
+    <CudaCompile />
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
     <ClCompile>
