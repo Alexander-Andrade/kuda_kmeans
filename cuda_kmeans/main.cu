@@ -202,18 +202,6 @@ vector<int> countClasterImages(hlabel_set_t& clastersLabels, int nClasters){
 	return clastersCounters;
 }
 
-ostream& outImagesPerEachClaster(hlabel_set_t& clastersLabels, int nClasters, ostream& s){
-	s << "clasters number : " << nClasters << endl;
-	int nImagesInClaster = 0;
-	int nImages = clastersLabels.size();
-	for (int i = 0; i < nClasters; i++){
-		nImagesInClaster = std::count_if(clastersLabels.begin(), clastersLabels.end(), [i](label_t& label){return label == i; });
-		s << "claster " << i << " : " << nImagesInClaster << ", " << (float)nImagesInClaster / nImages << "%" << endl;
-	}
-	return s;
-}
-
-
 void checkCudaError(cudaError_t e){
 	if (e != cudaSuccess)
 		throw CudaException(cudaGetErrorString(e));
