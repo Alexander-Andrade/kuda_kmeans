@@ -208,23 +208,32 @@ void checkCudaError(cudaError_t e){
 }
 
 template<typename T>
-T* linearPtrFromVectorMat(vector<vector<T>>& vec){
-	int height = vec.size();
-	int width = vec[0].size();
-
-	T* mat = new T[height * width];
-	int rowSize = width * sizeof(T);
-	for (int i = 0; i < height; i++)
-		memcpy(&mat[i * width], vec[i].data(), rowSize);
-	return mat;
-}
-
-template<typename T>
 T* allocDevice(int size){
 	T* ptr = nullptr;
 	cudaError_t allocError = cudaMalloc((void**)&ptr, size * sizeof(T));
 	checkCudaError(allocError);
 	return ptr;
+}
+
+template<typename T>
+T* allocHostPinned(int size){
+	T* ptr = nullptr;
+	cudaError_t allocError = cudaMallocHost((void**)&ptr, size * sizeof(T));
+	checkCudaError(allocError);
+	return ptr;
+}
+
+template<typename T>
+T* linearPtrFromVectorMat(vector<vector<T>>& vec){
+	int height = vec.size();
+	int width = vec[0].size();
+
+	//T* mat = new T[height * width];
+	T* mat = allocHostPinned<T>(height * width);
+	int rowSize = width * sizeof(T);
+	for (int i = 0; i < height; i++)
+		memcpy(&mat[i * width], vec[i].data(), rowSize);
+	return mat;
 }
 
 template<typename T>
@@ -308,13 +317,16 @@ void recalcClasterCenter(float* images, int nImages, label_t* clastersLabels, fl
 }
 
 
-hlabel_set_t markImagesGPU(float* images, int nImages, int nImageFeatures, int nClasters){
-	hlabel_set_t clastersLabels(nImages, 0);
+label_t* markImagesGPU(float* images, int nImages, int nImageFeatures, int nClasters){
+	//pinned memory
+	label_t* clastersLabels = allocHostPinned<label_t>(nImages);
 
 	int nClastersFeatures = nClasters * nImageFeatures;
-	int nbytesClastersFeatures = nClastersFeatures * sizeof(float);
+	int clCentersByteSize = nClastersFeatures * sizeof(float);
 
-	float* clastersCenters = new float[nClastersFeatures];
+	//float* clastersCenters = new float[nClastersFeatures];
+	float* clastersCenters = nullptr;
+	cudaMallocHost((void**)&clastersCenters, clCentersByteSize);
 	float* prevClastersCenters = new float[nClastersFeatures];
 
 	for (int i = 0; i < nClasters; i++)
@@ -327,18 +339,18 @@ hlabel_set_t markImagesGPU(float* images, int nImages, int nImageFeatures, int n
 	dim3 nThreads = dim3(1024);
 	dim3 nBlocks = dim3((nImages + nThreads.x - 1) / nThreads.x);
 	int nIters = 0;
-	while (memcmp(clastersCenters, prevClastersCenters, nbytesClastersFeatures) != 0){
+	while (memcmp(clastersCenters, prevClastersCenters, clCentersByteSize) != 0){
 		//parallel labelig
 		getClasterLabels<< <nBlocks, nThreads >> >(dImages, nImages, dClastersCenters, nClasters, nImageFeatures, dClastersLabels);
 		cudaStreamSynchronize(0);
-		cudaCopy(clastersLabels.data(), dClastersLabels, nImages, cudaMemcpyDeviceToHost);
+		cudaCopy(clastersLabels, dClastersLabels, nImages, cudaMemcpyDeviceToHost);
 
-		memcpy(prevClastersCenters, clastersCenters, nbytesClastersFeatures);
+		memcpy(prevClastersCenters, clastersCenters, clCentersByteSize);
 
 		for (int i = 0; i < nClasters; i++)
-			recalcClasterCenter(images, nImages, clastersLabels.data(), &clastersCenters[i * nImageFeatures], nImageFeatures, i);
+			recalcClasterCenter(images, nImages, clastersLabels, &clastersCenters[i * nImageFeatures], nImageFeatures, i);
 		
-		cudaMemcpy(dClastersCenters, clastersCenters, nbytesClastersFeatures, cudaMemcpyHostToDevice);
+		cudaMemcpy(dClastersCenters, clastersCenters, clCentersByteSize, cudaMemcpyHostToDevice);
 		nIters++;
 	}
 	cout << "nIters : " << nIters << endl;
@@ -373,11 +385,10 @@ int main(int argc, char* argv[]){
 	try{
 		timer.start();
 		//GPU algorithm
-		hlabel_set_t gpuClastersLabels = markImagesGPU(imagesPtr, nImages, nImageFeatures, nClasters);
-		
+		label_t* gpuClastersLabels = markImagesGPU(imagesPtr, nImages, nImageFeatures, nClasters);
 		double time = timer.time_diff();
 		cout << "features : " << nImageFeatures << endl;
-		vector<int> gpuClastCount = countClasterImages(gpuClastersLabels, nClasters);
+		vector<int> gpuClastCount = countClasterImages(hlabel_set_t(gpuClastersLabels, gpuClastersLabels + nImages), nClasters);
 		for (int i = 0; i < gpuClastCount.size(); i++)
 			cout << "claster " << i << " : " << gpuClastCount[i] << endl;
 		cout << "gpu time : " << time << endl;
