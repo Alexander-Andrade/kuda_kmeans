@@ -330,7 +330,7 @@ hlabel_set_t markImagesGPU(float* images, int nImages, int nImageFeatures, int n
 	while (memcmp(clastersCenters, prevClastersCenters, nbytesClastersFeatures) != 0){
 		//parallel labelig
 		getClasterLabels<< <nBlocks, nThreads >> >(dImages, nImages, dClastersCenters, nClasters, nImageFeatures, dClastersLabels);
-		cudaThreadSynchronize();
+		cudaStreamSynchronize(0);
 		cudaCopy(clastersLabels.data(), dClastersLabels, nImages, cudaMemcpyDeviceToHost);
 
 		memcpy(prevClastersCenters, clastersCenters, nbytesClastersFeatures);
