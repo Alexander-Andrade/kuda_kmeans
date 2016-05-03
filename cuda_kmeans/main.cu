@@ -372,18 +372,22 @@ hlabel_set_t markImagesGPU(float* images, int nImages, int nImageFeatures, int n
 	for (auto& stream : streams)
 		cudaStreamCreate(&stream);
 
-	dim3 nThreads = dim3(1024);
-	dim3 nBlocks = dim3((nImages + nThreads.x - 1) / nThreads.x);
 	int nIters = 0;
 	//float* dImages = cudaClone2D(images, nImages, nImageFeatures);
 	float* dImages = allocDevice<float>(nImages * nImageFeatures);
 	
 	//calc images data partition
 	int imagesInBytes = nImages * nImageFeatures * sizeof(float);
-	int nFeaturesInPartImages = (nImages / nStreams) * nImageFeatures;
+	int nImagesInPart = (nImages / nStreams);
+	int nImagesInLastPart = nImages - nImagesInPart * (nStreams - 1);
+	int bFeaturesInLastPartImages = nImagesInLastPart * nImageFeatures * sizeof(float);
+	int nFeaturesInPartImages = nImagesInPart * nImageFeatures;
 	int bFeaturesInPartImages = nFeaturesInPartImages * sizeof(float);
-	int bFeaturesInLastPartImages = imagesInBytes - nStreams * bFeaturesInPartImages;
-	//calc 
+	//calc label mark kernel data partition
+	dim3 nThreads = dim3(1024);
+	dim3 nBlocks = dim3((nImagesInPart + nThreads.x - 1) / nThreads.x);
+	dim3 nBlocksLast = dim3((nImagesInLastPart + nThreads.x - 1) / nThreads.x);
+	label_t* dClastersLabelsPtr = nullptr;
 	//async partitioned copy of images
 	float* imagesPtr = images;
 	float* dImagesPtr = dImages;
@@ -396,8 +400,14 @@ hlabel_set_t markImagesGPU(float* images, int nImages, int nImageFeatures, int n
 
 	while (memcmp(clastersCenters, prevClastersCenters, clCentersByteSize) != 0){
 		//parallel labelig
-
-		getClasterLabelsAsyncKern<float>(dImages, nImages, dClastersCenters, nClasters, nImageFeatures, dClastersLabels, streams);
+		dImagesPtr = dImages;
+		dClastersLabelsPtr = dClastersLabels;
+		for (int i = 0; i < nStreams - 1; i++){
+			getClasterLabels << <nBlocks, nThreads, 0, streams[i] >> >(dImagesPtr, nImagesInPart, dClastersCenters, nClasters, nImageFeatures, dClastersLabelsPtr);
+			dImagesPtr += nFeaturesInPartImages;
+			dClastersLabelsPtr += nImagesInPart;
+		}
+		getClasterLabels << <nBlocksLast, nThreads, 0, streams.back() >> >(dImagesPtr, nImagesInLastPart, dClastersCenters, nClasters, nImageFeatures, dClastersLabelsPtr);
 		for (auto& stream : streams)
 			cudaStreamSynchronize(stream);
 		cudaCopy(clastersLabels, dClastersLabels, nImages, cudaMemcpyDeviceToHost);
@@ -407,7 +417,7 @@ hlabel_set_t markImagesGPU(float* images, int nImages, int nImageFeatures, int n
 		for (int i = 0; i < nClasters; i++)
 			recalcClasterCenter(images, nImages, clastersLabels, &clastersCenters[i * nImageFeatures], nImageFeatures, i);
 
-		partitionedAsyncMemCpy2D(dClastersCenters, clastersCenters, nClasters , nImageFeatures, cudaMemcpyHostToDevice, streams);
+		cudaMemcpy(dClastersCenters, clastersCenters, clCentersByteSize, cudaMemcpyHostToDevice);
 		nIters++;
 	}
 	cout << "nIters : " << nIters << endl;
