@@ -382,9 +382,8 @@ hlabel_set_t markImagesGPU(float* images, int nImages, int nImageFeatures, int n
 				dClastersLabelsPtr += nImagesInPart;
 				clastersLabelsPtr += nImagesInPart;
 			}
-			cout << endl;
 		}
-		cout << endl << endl;
+		
 		for (auto& stream : streams)
 			cudaStreamSynchronize(stream);
 
@@ -447,7 +446,7 @@ int main(int argc, char* argv[]){
 		cout << "features : " << nImageFeatures << endl;
 		vector<int> gpuClastCount = countClasterImages(gpuClastersLabels, nClasters);
 		cudaFreeHost(imagesPtr);
-		for (int i = 0; i < gpuClastCount.size(); i++)
+		for (size_t i = 0; i < gpuClastCount.size(); i++)
 			cout << "claster " << i << " : " << gpuClastCount[i] << endl;
 		cout << "gpu time : " << time << endl;
 
