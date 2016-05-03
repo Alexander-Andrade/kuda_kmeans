@@ -56,6 +56,9 @@
       <AdditionalDependencies>cudart.lib;</AdditionalDependencies>
     </CudaLink>
     <CudaCompile />
+    <CudaCompile>
+      <AdditionalCompilerOptions>/FS</AdditionalCompilerOptions>
+    </CudaCompile>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
     <ClCompile>

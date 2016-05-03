@@ -121,7 +121,7 @@ void randomizeImage(himage_t& image){
 }
 
 void randomizeImage(float* image, int nImageFeatures){
-	for (int i = 0; i < nImageFeatures;i++)
+	for (int i = 0; i < nImageFeatures; i++)
 		image[i] = unifDistr(randGen);
 }
 
@@ -134,7 +134,7 @@ double euclideanDistance(himage_t& image1, himage_t image2){
 }
 
 __device__ float euclideanDistance(float* imgPtr1, float* imgPtr2, int nImageFeatures){
-	float squaredDiffSum =0.0;
+	float squaredDiffSum = 0.0;
 	for (int i = 0; i < nImageFeatures; i++)
 		squaredDiffSum += powf(imgPtr1[i] - imgPtr2[i], 2);
 	return sqrtf(squaredDiffSum);
@@ -197,7 +197,7 @@ void recalcClasterCenter(himage_set_t& images, hlabel_set_t& clastersLabels, him
 
 vector<int> countClasterImages(hlabel_set_t& clastersLabels, int nClasters){
 	vector<int> clastersCounters(nClasters);
-	for (int i = 0; i < nClasters;i++)
+	for (int i = 0; i < nClasters; i++)
 		clastersCounters[i] = std::count_if(clastersLabels.begin(), clastersLabels.end(), [i](label_t& label){return label == i; });
 	return clastersCounters;
 }
@@ -276,7 +276,6 @@ __global__ void getClasterLabels(float* images, int nImages, float* clastersCent
 	if (tid < nImages){
 		float* imagePtr = images + tid * nImageFeatures;
 		float minDist = euclideanDistance(imagePtr, clastersCenters, nImageFeatures);
-		//printf("tid=%d %f %f %f %f\n", tid, imagePtr[0], imagePtr[1], imagePtr[2], imagePtr[3]);
 		float curDist = 0.0;
 		float clasterLabel = 0;
 		for (int i = 1; i < nClasters; i++){
@@ -286,7 +285,6 @@ __global__ void getClasterLabels(float* images, int nImages, float* clastersCent
 				clasterLabel = i;
 			}
 		}
-		//printf("tid=%d, label=%f \n", tid, clasterLabel);
 		clasterLabels[tid] = clasterLabel;
 	}
 }
@@ -301,9 +299,9 @@ T* cudaClone2D(T* srcPtr, int height, int width, cudaMemcpyKind kind = cudaMemcp
 
 void recalcClasterCenter(float* images, int nImages, label_t* clastersLabels, float* clasterCenter, int nImageFeatures, int label){
 	memset(clasterCenter, 0, nImageFeatures * sizeof(float));
-	
+
 	int nImagesInClaster = 0;
-	
+
 	for (int i = 0; i < nImages; i++){
 		if (label == clastersLabels[i]){
 			addImage(clasterCenter, &images[i * nImageFeatures], nImageFeatures);
@@ -313,48 +311,103 @@ void recalcClasterCenter(float* images, int nImages, label_t* clastersLabels, fl
 	if (nImagesInClaster == 0)
 		randomizeImage(clasterCenter, nImageFeatures);
 	else
-		divImage(clasterCenter, nImageFeatures,(float)nImagesInClaster);
+		divImage(clasterCenter, nImageFeatures, (float)nImagesInClaster);
+}
+
+template<typename T>
+void partitionedAsyncMemCpy2D(T* src, T* dst, int height, int width, cudaMemcpyKind kind, vector<cudaStream_t>& streams){
+	T* dstBeg = dst;
+	int nStreams = streams.size();
+	int byteSize = width * height * sizeof(T);
+	int bitePartSize = (height / nStreams) * width * sizeof(T);
+	for (int i = 0; i < nStreams - 1; i++){
+		cudaMemcpyAsync(dst, src, bitePartSize, kind, streams[i]);
+		dst += bitePartSize;
+		src += bitePartSize;
+	}
+	int bytesLastPart = byteSize - (dst - dstBeg);
+	cudaMemcpyAsync(dst, src, bytesLastPart , kind, streams.back());
 }
 
 
-label_t* markImagesGPU(float* images, int nImages, int nImageFeatures, int nClasters){
-	//pinned memory
+template<typename T>
+void getClasterLabelsAsyncKern(T* dImages, int nImages, T* dClastersCenters, int nClasters, int nImageFeatures, label_t* dClastersLabels, vector<cudaStream_t>& streams){
+	int nStreams = streams.size();
+	dim3 nThreads = dim3(1024);
+	int nPartImages = nImages / nStreams;
+	T* imagesBeg = dImages;
+	dim3 nBlocks = dim3((nPartImages + nThreads.x - 1) / nThreads.x);
+	for (int i = 0; i < nStreams - 1; i++){
+		getClasterLabels << <nBlocks, nThreads, 0, streams[i]>> >(dImages, nPartImages , dClastersCenters, nClasters, nImageFeatures, dClastersLabels);
+		dImages += nPartImages;
+		dClastersLabels += nPartImages;
+	}
+	int nLastImages = nImages - (dImages - imagesBeg);
+	nBlocks = dim3((nLastImages + nThreads.x - 1) / nThreads.x);
+	getClasterLabels << <nBlocks, nThreads ,0 ,streams.back()>> >(dImages, nLastImages, dClastersCenters, nClasters, nImageFeatures, dClastersLabels);
+}
+
+hlabel_set_t markImagesGPU(float* images, int nImages, int nImageFeatures, int nClasters, int nStreams = 6){
 	label_t* clastersLabels = allocHostPinned<label_t>(nImages);
 
 	int nClastersFeatures = nClasters * nImageFeatures;
 	int clCentersByteSize = nClastersFeatures * sizeof(float);
 
-	//float* clastersCenters = new float[nClastersFeatures];
-	float* clastersCenters = nullptr;
-	cudaMallocHost((void**)&clastersCenters, clCentersByteSize);
+	float* clastersCenters = allocHostPinned<float>(nClastersFeatures);
 	float* prevClastersCenters = new float[nClastersFeatures];
 
 	for (int i = 0; i < nClasters; i++)
 		randomizeImage(&clastersCenters[i * nImageFeatures], nImageFeatures);
 
-	float* dImages = cudaClone2D(images, nImages, nImageFeatures);
 	label_t* dClastersLabels = allocDevice<label_t>(nImages);
 	float* dClastersCenters = cudaClone2D(clastersCenters, nClasters, nImageFeatures);
+
+	vector<cudaStream_t> streams(nStreams);
+	for (auto& stream : streams)
+		cudaStreamCreate(&stream);
 
 	dim3 nThreads = dim3(1024);
 	dim3 nBlocks = dim3((nImages + nThreads.x - 1) / nThreads.x);
 	int nIters = 0;
+	//float* dImages = cudaClone2D(images, nImages, nImageFeatures);
+	float* dImages = allocDevice<float>(nImages * nImageFeatures);
+	cout << "tut";
+	partitionedAsyncMemCpy2D(dImages, images, nImages, cudaMemcpyHostToDevice, streams);
+
 	while (memcmp(clastersCenters, prevClastersCenters, clCentersByteSize) != 0){
 		//parallel labelig
-		getClasterLabels<< <nBlocks, nThreads >> >(dImages, nImages, dClastersCenters, nClasters, nImageFeatures, dClastersLabels);
-		cudaStreamSynchronize(0);
+
+		getClasterLabelsAsyncKern<float>(dImages, nImages, dClastersCenters, nClasters, nImageFeatures, dClastersLabels, streams);
+		for (auto& stream : streams)
+			cudaStreamSynchronize(stream);
 		cudaCopy(clastersLabels, dClastersLabels, nImages, cudaMemcpyDeviceToHost);
 
 		memcpy(prevClastersCenters, clastersCenters, clCentersByteSize);
 
 		for (int i = 0; i < nClasters; i++)
 			recalcClasterCenter(images, nImages, clastersLabels, &clastersCenters[i * nImageFeatures], nImageFeatures, i);
-		
-		cudaMemcpy(dClastersCenters, clastersCenters, clCentersByteSize, cudaMemcpyHostToDevice);
+
+		partitionedAsyncMemCpy(dClastersCenters, clastersCenters, nClastersFeatures, cudaMemcpyHostToDevice, streams);
 		nIters++;
 	}
 	cout << "nIters : " << nIters << endl;
-	return clastersLabels;
+
+
+
+	//memory free
+	for (auto& stream : streams)
+		cudaStreamDestroy(stream);
+
+	cudaFreeHost(clastersCenters);
+	delete[] prevClastersCenters;
+
+	cudaFree(dClastersLabels);
+	cudaFree(dClastersCenters);
+	cudaFree(dImages);
+
+	hlabel_set_t labels(clastersLabels, clastersLabels + nImages);
+	cudaFreeHost(clastersLabels);
+	return labels;
 }
 
 
@@ -378,38 +431,37 @@ int main(int argc, char* argv[]){
 	int nImages = images.size();
 	int nImageFeatures = images[0].size();
 
-	
-	float* imagesPtr = linearPtrFromVectorMat(normImages);
-	
 	Timer timer;
 	try{
+		float* imagesPtr = linearPtrFromVectorMat(normImages);
 		timer.start();
 		//GPU algorithm
-		label_t* gpuClastersLabels = markImagesGPU(imagesPtr, nImages, nImageFeatures, nClasters);
+		hlabel_set_t gpuClastersLabels = markImagesGPU(imagesPtr, nImages, nImageFeatures, nClasters);
 		double time = timer.time_diff();
 		cout << "features : " << nImageFeatures << endl;
-		vector<int> gpuClastCount = countClasterImages(hlabel_set_t(gpuClastersLabels, gpuClastersLabels + nImages), nClasters);
+		vector<int> gpuClastCount = countClasterImages(gpuClastersLabels, nClasters);
+		cudaFreeHost(imagesPtr);
 		for (int i = 0; i < gpuClastCount.size(); i++)
 			cout << "claster " << i << " : " << gpuClastCount[i] << endl;
 		cout << "gpu time : " << time << endl;
+
+		cout << endl;
+
+		timer.start();
+		//CPU algorithm
+		hlabel_set_t cpuClastersLabels = markImagesCPU(normImages, nClasters);
+
+		time = timer.time_diff();
+
+		vector<int> cpuClastCount = countClasterImages(cpuClastersLabels, nClasters);
+		for (int i = 0; i < cpuClastCount.size(); i++)
+			cout << "claster " << i << " : " << cpuClastCount[i] << endl;
+		cout << "cpu time : " << time << endl;
+
 	}
-	catch(CudaException& e){
+	catch (CudaException& e){
 		cout << e.what();
 	}
-	
-	cout << endl;
-
-	timer.start();
-	//CPU algorithm
-	hlabel_set_t cpuClastersLabels = markImagesCPU(normImages, nClasters);
-	
-	double time = timer.time_diff();
-
-	vector<int> cpuClastCount = countClasterImages(cpuClastersLabels, nClasters);
-	for (int i = 0; i < cpuClastCount.size(); i++)
-		cout << "claster " << i << " : " << cpuClastCount[i] << endl;
-	cout << "cpu time : " << time << endl;
-	
 
 	std::system("pause");
 	return 0;
