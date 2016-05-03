@@ -208,11 +208,19 @@ void checkCudaError(cudaError_t e){
 }
 
 template<typename T>
+T* allocHostPinned(int size){
+	T* ptr = nullptr;
+	cudaError_t allocError = cudaMallocHost((void**)&ptr, size * sizeof(T));
+	checkCudaError(allocError);
+	return ptr;
+}
+
+template<typename T>
 T* linearPtrFromVectorMat(vector<vector<T>>& vec){
 	int height = vec.size();
 	int width = vec[0].size();
 
-	T* mat = new T[height * width];
+	T* mat = allocHostPinned<T>(height * width);
 	int rowSize = width * sizeof(T);
 	for (int i = 0; i < height; i++)
 		memcpy(&mat[i * width], vec[i].data(), rowSize);
@@ -309,12 +317,12 @@ void recalcClasterCenter(float* images, int nImages, label_t* clastersLabels, fl
 
 
 hlabel_set_t markImagesGPU(float* images, int nImages, int nImageFeatures, int nClasters){
-	hlabel_set_t clastersLabels(nImages, 0);
+	label_t* clastersLabels = allocHostPinned<label_t>(nImages);
 
 	int nClastersFeatures = nClasters * nImageFeatures;
 	int nbytesClastersFeatures = nClastersFeatures * sizeof(float);
 
-	float* clastersCenters = new float[nClastersFeatures];
+	float* clastersCenters = allocHostPinned<float>(nClastersFeatures);
 	float* prevClastersCenters = new float[nClastersFeatures];
 
 	for (int i = 0; i < nClasters; i++)
@@ -331,17 +339,17 @@ hlabel_set_t markImagesGPU(float* images, int nImages, int nImageFeatures, int n
 		//parallel labelig
 		getClasterLabels<< <nBlocks, nThreads >> >(dImages, nImages, dClastersCenters, nClasters, nImageFeatures, dClastersLabels);
 		cudaThreadSynchronize();
-		cudaCopy(clastersLabels.data(), dClastersLabels, nImages, cudaMemcpyDeviceToHost);
+		cudaCopy(clastersLabels, dClastersLabels, nImages, cudaMemcpyDeviceToHost);
 
 		memcpy(prevClastersCenters, clastersCenters, nbytesClastersFeatures);
 
 		for (int i = 0; i < nClasters; i++)
-			recalcClasterCenter(images, nImages, clastersLabels.data(), &clastersCenters[i * nImageFeatures], nImageFeatures, i);
+			recalcClasterCenter(images, nImages, clastersLabels, &clastersCenters[i * nImageFeatures], nImageFeatures, i);
 		
 		cudaMemcpy(dClastersCenters, clastersCenters, nbytesClastersFeatures, cudaMemcpyHostToDevice);
 		nIters++;
 	}
-	cout << "nIters : " << nIters << endl;
+	std::cout << "nIters : " << nIters << endl;
 
 	cudaFreeHost(clastersCenters);
 	delete[] prevClastersCenters;
@@ -349,8 +357,9 @@ hlabel_set_t markImagesGPU(float* images, int nImages, int nImageFeatures, int n
 	cudaFree(dClastersLabels);
 	cudaFree(dClastersCenters);
 	cudaFree(dImages);
-
-	return clastersLabels;
+	hlabel_set_t labels = hlabel_set_t(clastersLabels, clastersLabels + nImages);
+	cudaFreeHost(clastersLabels);
+	return labels;
 }
 
 
