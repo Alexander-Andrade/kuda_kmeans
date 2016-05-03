@@ -342,6 +342,14 @@ hlabel_set_t markImagesGPU(float* images, int nImages, int nImageFeatures, int n
 		nIters++;
 	}
 	cout << "nIters : " << nIters << endl;
+
+	cudaFreeHost(clastersCenters);
+	delete[] prevClastersCenters;
+
+	cudaFree(dClastersLabels);
+	cudaFree(dClastersCenters);
+	cudaFree(dImages);
+
 	return clastersLabels;
 }
 
@@ -381,6 +389,8 @@ int main(int argc, char* argv[]){
 		for (int i = 0; i < gpuClastCount.size(); i++)
 			cout << "claster " << i << " : " << gpuClastCount[i] << endl;
 		cout << "gpu time : " << time << endl;
+
+		cudaFreeHost(imagesPtr);
 	}
 	catch(CudaException& e){
 		cout << e.what();
