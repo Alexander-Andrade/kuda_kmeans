@@ -270,23 +270,31 @@ hlabel_set_t markImagesCPU(himage_set_t& images, int nClasters){
 }
 
 
-__global__ void getClasterLabels(float* images, int nImages, float* clastersCenters, int nClasters, int nImageFeatures, label_t* clasterLabels){
-	uint tid = blockIdx.x * blockDim.x + threadIdx.x;
-	if (tid < nImages){
-		float* imagePtr = images + tid * nImageFeatures;
-		float minDist = euclideanDistance(imagePtr, clastersCenters, nImageFeatures);
+__global__ void getClasterLabels(float* images, int nImages, float* clastersCenters, int nClasters, int nImageFeatures, label_t* clasterLabels,size_t nSharedMem){
+	extern __shared__ float sdata[];
+	
+	uint i = blockIdx.x * blockDim.x + threadIdx.x;
+	//put tid on registers
+	uint tid = threadIdx.x;
+	if (tid < nSharedMem)
+		//each thread loads one element from global to shared memory
+		sdata[tid] = clastersCenters[tid];
+	__syncthreads();
+	if (i < nImages){
+		float* imagePtr = images + i * nImageFeatures;
+		float minDist = euclideanDistance(imagePtr, sdata, nImageFeatures);
 		//printf("tid=%d %f %f %f %f\n", tid, imagePtr[0], imagePtr[1], imagePtr[2], imagePtr[3]);
 		float curDist = 0.0;
 		float clasterLabel = 0;
-		for (int i = 1; i < nClasters; i++){
-			curDist = euclideanDistance(imagePtr, &clastersCenters[i * nImageFeatures], nImageFeatures);
+		for (int j = 1; j < nClasters; j++){
+			curDist = euclideanDistance(imagePtr, sdata + j * nImageFeatures, nImageFeatures);
 			if (curDist < minDist){
 				minDist = curDist;
-				clasterLabel = i;
+				clasterLabel = j;
 			}
 		}
 		//printf("tid=%d, label=%f \n", tid, clasterLabel);
-		clasterLabels[tid] = clasterLabel;
+		clasterLabels[i] = clasterLabel;
 	}
 }
 
@@ -335,9 +343,12 @@ hlabel_set_t markImagesGPU(float* images, int nImages, int nImageFeatures, int n
 	dim3 nThreads = dim3(1024);
 	dim3 nBlocks = dim3((nImages + nThreads.x - 1) / nThreads.x);
 	int nIters = 0;
+	//shared mem for clastersCenters
+	size_t nSharedMem = nImageFeatures * nClasters;
+	size_t sharedMemByteSize = nSharedMem * sizeof(float);
 	while (memcmp(clastersCenters, prevClastersCenters, nbytesClastersFeatures) != 0){
 		//parallel labelig
-		getClasterLabels<< <nBlocks, nThreads >> >(dImages, nImages, dClastersCenters, nClasters, nImageFeatures, dClastersLabels);
+		getClasterLabels<< <nBlocks, nThreads, sharedMemByteSize >> >(dImages, nImages, dClastersCenters, nClasters, nImageFeatures, dClastersLabels, nSharedMem);
 		cudaThreadSynchronize();
 		cudaCopy(clastersLabels, dClastersLabels, nImages, cudaMemcpyDeviceToHost);
 
