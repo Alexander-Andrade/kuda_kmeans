@@ -314,44 +314,6 @@ void recalcClasterCenter(float* images, int nImages, label_t* clastersLabels, fl
 		divImage(clasterCenter, nImageFeatures, (float)nImagesInClaster);
 }
 
-template<typename T>
-void partitionedAsyncMemCpy2D(T* src, T* dst, int height, int width, cudaMemcpyKind kind, vector<cudaStream_t>& streams){
-	T* dstBeg = dst;
-	int nStreams = streams.size();
-	int byteSize = width * height * sizeof(T);
-	int byteCopyCounter = 0;
-	int nPartSize = (height / nStreams) * width;
-	int bytePartSize = nPartSize * sizeof(T);
-	for (int i = 0; i < nStreams - 1; i++){
-		cudaMemcpyAsync(dst, src, bytePartSize, kind, streams[i]);
-		dst += nPartSize;
-		src += nPartSize;
-		byteCopyCounter += bytePartSize;
-	}
-	int bytesLastPart = byteSize - (dst - dstBeg) * sizeof(T);
-	cudaMemcpyAsync(dst, src, bytesLastPart , kind, streams.back());
-}
-
-
-template<typename T>
-void getClasterLabelsAsyncKern(T* dImages, int nImages, T* dClastersCenters, int nClasters, int nImageFeatures, label_t* dClastersLabels, vector<cudaStream_t>& streams){
-	int nStreams = streams.size();
-	dim3 nThreads = dim3(1024);
-	int nPartImages = (nImages / nStreams);
-	int nFeaturesInPartImages = nPartImages * nImageFeatures;
-	int featuresCounter = 0;
-	label_t* labelsBeg = dClastersLabels;
-	dim3 nBlocks = dim3((nPartImages + nThreads.x - 1) / nThreads.x);
-	for (int i = 0; i < nStreams - 1; i++){
-		getClasterLabels << <nBlocks, nThreads, 0, streams[i]>> >(dImages, nPartImages , dClastersCenters, nClasters, nImageFeatures, dClastersLabels);
-		dImages += nFeaturesInPartImages;
-		dClastersLabels += nPartImages;
-		featuresCounter += nPartImages;
-	}
-	int nLastImages = nImages - (dClastersLabels - labelsBeg);
-	nBlocks = dim3((nLastImages + nThreads.x - 1) / nThreads.x);
-	getClasterLabels << <nBlocks, nThreads ,0 ,streams.back()>> >(dImages, nLastImages, dClastersCenters, nClasters, nImageFeatures, dClastersLabels);
-}
 
 hlabel_set_t markImagesGPU(float* images, int nImages, int nImageFeatures, int nClasters, int nStreams = 6){
 	label_t* clastersLabels = allocHostPinned<label_t>(nImages);
@@ -388,6 +350,7 @@ hlabel_set_t markImagesGPU(float* images, int nImages, int nImageFeatures, int n
 	dim3 nBlocks = dim3((nImagesInPart + nThreads.x - 1) / nThreads.x);
 	dim3 nBlocksLast = dim3((nImagesInLastPart + nThreads.x - 1) / nThreads.x);
 	label_t* dClastersLabelsPtr = nullptr;
+	label_t* clastersLabelsPtr = nullptr;
 	//async partitioned copy of images
 	float* imagesPtr = images;
 	float* dImagesPtr = dImages;
@@ -402,15 +365,23 @@ hlabel_set_t markImagesGPU(float* images, int nImages, int nImageFeatures, int n
 		//parallel labelig
 		dImagesPtr = dImages;
 		dClastersLabelsPtr = dClastersLabels;
-		for (int i = 0; i < nStreams - 1; i++){
-			getClasterLabels << <nBlocks, nThreads, 0, streams[i] >> >(dImagesPtr, nImagesInPart, dClastersCenters, nClasters, nImageFeatures, dClastersLabelsPtr);
-			dImagesPtr += nFeaturesInPartImages;
-			dClastersLabelsPtr += nImagesInPart;
+		clastersLabelsPtr = clastersLabels;
+
+		for (int i = 0; i < nStreams; i++){
+			if (i == nStreams - 1){
+				getClasterLabels << <nBlocksLast, nThreads, 0, streams[i] >> >(dImagesPtr, nImagesInLastPart, dClastersCenters, nClasters, nImageFeatures, dClastersLabelsPtr);
+				cudaMemcpyAsync(clastersLabelsPtr, dClastersLabelsPtr, nImagesInLastPart, cudaMemcpyDeviceToHost, streams[i]);
+			}
+			else{
+				getClasterLabels << <nBlocks, nThreads, 0, streams[i] >> >(dImagesPtr, nImagesInPart, dClastersCenters, nClasters, nImageFeatures, dClastersLabelsPtr);
+				cudaMemcpyAsync(clastersLabelsPtr, dClastersLabelsPtr, nImagesInPart, cudaMemcpyDeviceToHost, streams[i]);
+				dImagesPtr += nFeaturesInPartImages;
+				dClastersLabelsPtr += nImagesInPart;
+				clastersLabelsPtr += nImagesInPart;
+			}
 		}
-		getClasterLabels << <nBlocksLast, nThreads, 0, streams.back() >> >(dImagesPtr, nImagesInLastPart, dClastersCenters, nClasters, nImageFeatures, dClastersLabelsPtr);
 		for (auto& stream : streams)
 			cudaStreamSynchronize(stream);
-		cudaCopy(clastersLabels, dClastersLabels, nImages, cudaMemcpyDeviceToHost);
 
 		memcpy(prevClastersCenters, clastersCenters, clCentersByteSize);
 
